@@ -1,6 +1,7 @@
 #include "stella_vslam/camera/base.h"
 
 #include <iostream>
+#include <opencv2/core/mat.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -9,12 +10,10 @@ namespace camera {
 
 base::base(const std::string& name, const setup_type_t setup_type, const model_type_t model_type, const color_order_t color_order,
            const unsigned int cols, const unsigned int rows, const double fps,
-           const double focal_x_baseline, const double true_baseline, const double depth_thr,
-           const unsigned int num_grid_cols, const unsigned int num_grid_rows)
+           const double focal_x_baseline, const double true_baseline, const double depth_thr)
     : name_(name), setup_type_(setup_type), model_type_(model_type), color_order_(color_order),
       cols_(cols), rows_(rows), fps_(fps),
-      focal_x_baseline_(focal_x_baseline), true_baseline_(true_baseline), depth_thr_(depth_thr),
-      num_grid_cols_(num_grid_cols), num_grid_rows_(num_grid_rows) {
+      focal_x_baseline_(focal_x_baseline), true_baseline_(true_baseline), depth_thr_(depth_thr) {
     spdlog::debug("CONSTRUCT: camera::base");
 }
 
@@ -95,6 +94,10 @@ color_order_t base::load_color_order(const std::string& color_order_str) {
         throw std::runtime_error("Invalid color order: " + color_order_str);
     }
     return static_cast<color_order_t>(std::distance(color_order_to_string.begin(), itr));
+}
+
+bool base::is_valid_shape(const cv::Mat& img) const {
+    return static_cast<int>(cols_) == img.cols && static_cast<int>(rows_) == img.rows;
 }
 
 void base::show_common_parameters() const {

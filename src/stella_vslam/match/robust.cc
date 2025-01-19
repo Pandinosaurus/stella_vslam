@@ -11,8 +11,11 @@
 namespace stella_vslam {
 namespace match {
 
-unsigned int robust::match_for_triangulation(const std::shared_ptr<data::keyframe>& keyfrm_1, const std::shared_ptr<data::keyframe>& keyfrm_2, const Mat33_t& E_12,
-                                             std::vector<std::pair<unsigned int, unsigned int>>& matched_idx_pairs) const {
+unsigned int robust::match_for_triangulation(const std::shared_ptr<data::keyframe>& keyfrm_1,
+                                             const std::shared_ptr<data::keyframe>& keyfrm_2,
+                                             const Mat33_t& E_12,
+                                             std::vector<std::pair<unsigned int, unsigned int>>& matched_idx_pairs,
+                                             const float residual_rad_thr) const {
     unsigned int num_matches = 0;
 
     // Project the center of keyframe 1 to keyframe 2
@@ -30,9 +33,9 @@ unsigned int robust::match_for_triangulation(const std::shared_ptr<data::keyfram
     // Save the matching information
     // Discard the already matched keypoints in keyframe 2
     // to acquire a unique association to each keypoint in keyframe 1
-    std::vector<bool> is_already_matched_in_keyfrm_2(keyfrm_2->frm_obs_.num_keypts_, false);
+    std::vector<bool> is_already_matched_in_keyfrm_2(keyfrm_2->frm_obs_.undist_keypts_.size(), false);
     // Save the keypoint idx in keyframe 2 which is already associated to the keypoint idx in keyframe 1
-    std::vector<int> matched_indices_2_in_keyfrm_1(keyfrm_1->frm_obs_.num_keypts_, -1);
+    std::vector<int> matched_indices_2_in_keyfrm_1(keyfrm_1->frm_obs_.undist_keypts_.size(), -1);
 
     data::bow_feature_vector::const_iterator itr_1 = keyfrm_1->bow_feat_vec_.begin();
     data::bow_feature_vector::const_iterator itr_2 = keyfrm_2->bow_feat_vec_.begin();
@@ -65,6 +68,7 @@ unsigned int robust::match_for_triangulation(const std::shared_ptr<data::keyfram
                 // Find a keypoint in keyframe 2 that has the minimum hamming distance
                 unsigned int best_hamm_dist = HAMMING_DIST_THR_LOW;
                 int best_idx_2 = -1;
+                unsigned int second_best_hamm_dist = MAX_HAMMING_DIST;
 
                 for (const auto idx_2 : keyfrm_2_indices) {
                     // Ignore if the keypoint is associated any 3D points
@@ -111,14 +115,26 @@ unsigned int robust::match_for_triangulation(const std::shared_ptr<data::keyfram
 
                     // Check consistency in Matrix E
                     const bool is_inlier = check_epipolar_constraint(bearing_1, bearing_2, E_12,
-                                                                     keyfrm_1->orb_params_->scale_factors_.at(keypt_1.octave));
+                                                                     keyfrm_1->orb_params_->scale_factors_.at(keypt_1.octave),
+                                                                     residual_rad_thr);
                     if (is_inlier) {
-                        best_idx_2 = idx_2;
-                        best_hamm_dist = hamm_dist;
+                        if (hamm_dist < best_hamm_dist) {
+                            second_best_hamm_dist = best_hamm_dist;
+                            best_hamm_dist = hamm_dist;
+                            best_idx_2 = idx_2;
+                        }
+                        else if (hamm_dist < second_best_hamm_dist) {
+                            second_best_hamm_dist = hamm_dist;
+                        }
                     }
                 }
 
                 if (best_idx_2 < 0) {
+                    continue;
+                }
+
+                // Ratio test
+                if (lowe_ratio_ * second_best_hamm_dist < static_cast<float>(best_hamm_dist)) {
                     continue;
                 }
 
@@ -157,7 +173,7 @@ unsigned int robust::match_keyframes(const std::shared_ptr<data::keyframe>& keyf
                                      std::vector<std::shared_ptr<data::landmark>>& matched_lms_in_frm,
                                      bool validate_with_essential_solver, bool use_fixed_seed) const {
     // Initialization
-    const auto num_frm_keypts = keyfrm1->frm_obs_.num_keypts_;
+    const auto num_frm_keypts = keyfrm1->frm_obs_.undist_keypts_.size();
     const auto keyfrm_lms = keyfrm2->get_landmarks();
     unsigned int num_inlier_matches = 0;
     matched_lms_in_frm = std::vector<std::shared_ptr<data::landmark>>(num_frm_keypts, nullptr);
@@ -205,7 +221,7 @@ unsigned int robust::match_frame_and_keyframe(data::frame& frm, const std::share
                                               std::vector<std::shared_ptr<data::landmark>>& matched_lms_in_frm,
                                               bool use_fixed_seed) const {
     // Initialization
-    const auto num_frm_keypts = frm.frm_obs_.num_keypts_;
+    const auto num_frm_keypts = frm.frm_obs_.undist_keypts_.size();
     const auto keyfrm_lms = keyfrm->get_landmarks();
     unsigned int num_inlier_matches = 0;
     matched_lms_in_frm = std::vector<std::shared_ptr<data::landmark>>(num_frm_keypts, nullptr);
@@ -237,13 +253,15 @@ unsigned int robust::match_frame_and_keyframe(data::frame& frm, const std::share
     return num_inlier_matches;
 }
 
-unsigned int robust::brute_force_match(const data::frame_observation& frm_obs, const std::shared_ptr<data::keyframe>& keyfrm, std::vector<std::pair<int, int>>& matches) const {
+unsigned int robust::brute_force_match(const data::frame_observation& frm_obs,
+                                       const std::shared_ptr<data::keyframe>& keyfrm,
+                                       std::vector<std::pair<int, int>>& matches) const {
     unsigned int num_matches = 0;
 
     // 1. Acquire the frame and keyframe information
 
-    const auto num_keypts_1 = frm_obs.num_keypts_;
-    const auto num_keypts_2 = keyfrm->frm_obs_.num_keypts_;
+    const auto num_keypts_1 = frm_obs.undist_keypts_.size();
+    const auto num_keypts_2 = keyfrm->frm_obs_.undist_keypts_.size();
     const auto keypts_1 = frm_obs.undist_keypts_;
     const auto keypts_2 = keyfrm->frm_obs_.undist_keypts_;
     const auto lms_2 = keyfrm->get_landmarks();
@@ -334,22 +352,16 @@ unsigned int robust::brute_force_match(const data::frame_observation& frm_obs, c
 }
 
 bool robust::check_epipolar_constraint(const Vec3_t& bearing_1, const Vec3_t& bearing_2,
-                                       const Mat33_t& E_12, const float bearing_1_scale_factor) const {
+                                       const Mat33_t& E_12, float residual_rad_thr,
+                                       const float bearing_1_scale_factor) const {
     // Normal vector of the epipolar plane on keyframe 1
     const Vec3_t epiplane_in_1 = E_12 * bearing_2;
 
     // Acquire the angle formed by the normal vector and the bearing
-    const auto cos_residual = epiplane_in_1.dot(bearing_1) / epiplane_in_1.norm();
-    const auto residual_rad = M_PI / 2.0 - std::abs(std::acos(cos_residual));
-
-    // The Inlier threshold value is 0.2 degree
-    // (e.g. for the camera with width of 900-pixel and 90-degree FOV, 0.2 degree is equivalent to 2 pixel in the horizontal direction)
-    // TODO: should prameterize the threshold
-    constexpr double residual_deg_thr = 0.2;
-    constexpr double residual_rad_thr = residual_deg_thr * M_PI / 180.0;
+    const auto cos_residual = std::min(1.0, std::max(-1.0, epiplane_in_1.dot(bearing_1) / epiplane_in_1.norm()));
+    const auto residual_rad = std::abs(M_PI / 2.0 - std::acos(cos_residual));
 
     // The larger keypoint scale permits less constraints
-    // TODO: should consider the threshold weighting
     return residual_rad < residual_rad_thr * bearing_1_scale_factor;
 }
 
