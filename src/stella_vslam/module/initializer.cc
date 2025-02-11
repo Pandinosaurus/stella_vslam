@@ -8,6 +8,7 @@
 #include "stella_vslam/marker_model/base.h"
 #include "stella_vslam/match/area.h"
 #include "stella_vslam/module/initializer.h"
+#include "stella_vslam/module/marker_initializer.h"
 #include "stella_vslam/optimize/global_bundle_adjuster.h"
 
 #include <spdlog/spdlog.h>
@@ -15,9 +16,9 @@
 namespace stella_vslam {
 namespace module {
 
-initializer::initializer(data::map_database* map_db, data::bow_database* bow_db,
+initializer::initializer(data::map_database* map_db,
                          const YAML::Node& yaml_node)
-    : map_db_(map_db), bow_db_(bow_db),
+    : map_db_(map_db),
       num_ransac_iters_(yaml_node["num_ransac_iterations"].as<unsigned int>(100)),
       min_num_valid_pts_(yaml_node["min_num_valid_pts"].as<unsigned int>(50)),
       min_num_triangulated_pts_(yaml_node["min_num_triangulated_pts"].as<unsigned int>(50)),
@@ -25,7 +26,8 @@ initializer::initializer(data::map_database* map_db, data::bow_database* bow_db,
       reproj_err_thr_(yaml_node["reprojection_error_threshold"].as<float>(4.0)),
       num_ba_iters_(yaml_node["num_ba_iterations"].as<unsigned int>(20)),
       scaling_factor_(yaml_node["scaling_factor"].as<float>(1.0)),
-      use_fixed_seed_(yaml_node["use_fixed_seed"].as<bool>(false)) {
+      use_fixed_seed_(yaml_node["use_fixed_seed"].as<bool>(false)),
+      required_keyframes_for_marker_initialization_(yaml_node["required_keyframes_for_marker_initialization"].as<unsigned int>(3)) {
     spdlog::debug("CONSTRUCT: module::initializer");
 }
 
@@ -202,8 +204,10 @@ bool initializer::create_map_for_monocular(data::bow_vocabulary* bow_vocab, data
     map_db_->add_spanning_root(init_keyfrm);
 
     // compute BoW representations
-    init_keyfrm->compute_bow(bow_vocab);
-    curr_keyfrm->compute_bow(bow_vocab);
+    if (bow_vocab) {
+        init_keyfrm->compute_bow(bow_vocab);
+        curr_keyfrm->compute_bow(bow_vocab);
+    }
 
     // add the keyframes to the map DB
     map_db_->add_keyframe(init_keyfrm);
@@ -266,7 +270,9 @@ bool initializer::create_map_for_monocular(data::bow_vocabulary* bow_vocab, data
             }
             // Set the association to the new marker
             keyfrm->add_marker(marker);
-            marker->observations_.push_back(keyfrm);
+            marker->observations_.emplace(keyfrm->id_, keyfrm);
+
+            marker_initializer::check_marker_initialization(*marker, required_keyframes_for_marker_initialization_);
         }
     };
     assign_marker_associations(init_keyfrm);
@@ -279,14 +285,20 @@ bool initializer::create_map_for_monocular(data::bow_vocabulary* bow_vocab, data
 
     if (indefinite_scale) {
         // scale the map so that the median of depths is 1.0
-        const auto median_depth = init_keyfrm->compute_median_depth(init_keyfrm->camera_->model_type_ == camera::model_type_t::Equirectangular);
-        const auto inv_median_depth = 1.0 / median_depth;
-        if (curr_keyfrm->get_num_tracked_landmarks(1) < min_num_triangulated_pts_ && median_depth < 0) {
+        float median_scale;
+        if (init_keyfrm->camera_->model_type_ == camera::model_type_t::Equirectangular) {
+            median_scale = init_keyfrm->compute_median_distance();
+        }
+        else {
+            median_scale = init_keyfrm->compute_median_depth(true);
+        }
+        const auto inv_median_scale = 1.0 / median_scale;
+        if (curr_keyfrm->get_num_tracked_landmarks(1) < min_num_triangulated_pts_ && median_scale < 0) {
             spdlog::info("seems to be wrong initialization, resetting");
             state_ = initializer_state_t::Wrong;
             return false;
         }
-        scale_map(init_keyfrm, curr_keyfrm, inv_median_depth * scaling_factor_);
+        scale_map(init_keyfrm, curr_keyfrm, inv_median_scale * scaling_factor_);
     }
 
     // update the current frame pose
@@ -334,7 +346,9 @@ bool initializer::create_map_for_stereo(data::bow_vocabulary* bow_vocab, data::f
     map_db_->add_spanning_root(curr_keyfrm);
 
     // compute BoW representation
-    curr_keyfrm->compute_bow(bow_vocab);
+    if (bow_vocab) {
+        curr_keyfrm->compute_bow(bow_vocab);
+    }
 
     // add to the map DB
     map_db_->add_keyframe(curr_keyfrm);
@@ -343,7 +357,7 @@ bool initializer::create_map_for_stereo(data::bow_vocabulary* bow_vocab, data::f
     curr_frm.ref_keyfrm_ = curr_keyfrm;
     map_db_->update_frame_statistics(curr_frm, false);
 
-    for (unsigned int idx = 0; idx < curr_frm.frm_obs_.num_keypts_; ++idx) {
+    for (unsigned int idx = 0; idx < curr_frm.frm_obs_.undist_keypts_.size(); ++idx) {
         // add a new landmark if tht corresponding depth is valid
         const auto z = curr_frm.frm_obs_.depths_.at(idx);
         if (z <= 0) {
